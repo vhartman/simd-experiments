@@ -1,3 +1,5 @@
+// Compile with: g++ -o main.exe main.cpp -Ofast -march=native -fno-omit-frame-pointer -fopenmp -unroll-loops
+
 #include <iostream>
 #include <vector>
 #include <array>
