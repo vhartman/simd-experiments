@@ -36,6 +36,19 @@ struct Sphere{
   T r;
 };
 
+
+// Axis aligned box
+template<typename T>
+struct AABB{
+  T xmin;
+  T ymin;
+  T zmin;
+
+  T xmax;
+  T ymax;
+  T zmax;
+};
+
 template<typename T>
 struct SphereArray{
   std::array<T, 8> x;
@@ -52,6 +65,117 @@ bool collides(const Sphere<T> &l, const Sphere<T> &r){
     return true;
   }
 
+  return false;
+}
+
+template<typename T>
+bool collides(const AABB<T> &aabb, const Sphere<T> &l){
+  // copmute distance from center of sphere to box on each axis
+  auto check = [&](
+    const T pn,
+    const T bmin,
+    const T bmax ) -> T {
+    const T v = pn;
+
+    T out = 0;
+
+    if ( v < bmin ){
+      const T val = (bmin - v);
+      out += val * val;
+    }
+
+    if ( v > bmax ){
+      const T val = (v - bmax);
+      out += val * val;
+    }
+
+    return out;
+  };
+
+  auto check_branchless = [&](
+    const T pn,
+    const T bmin,
+    const T bmax ) -> T {
+    const T lower_diff = std::max((bmin - pn), (T)0.);
+    const T upper_diff = std::max((pn-bmax), (T)0.);
+    const T out = std::max(
+                          lower_diff*lower_diff,
+                          upper_diff*upper_diff);
+    return out;
+  };
+
+  // Squared distance
+  T sq = 0.0;
+  sq += check( l.x, aabb.xmin, aabb.xmax );
+  sq += check( l.y, aabb.ymin, aabb.ymax );
+  sq += check( l.z, aabb.zmin, aabb.zmax );
+
+  return sq <= l.r * l.r;
+}
+
+bool simd_collides(const AABB<float> &aabb, const SphereArray<float> &rs){
+  __m256 zero = _mm256_setzero_ps();
+
+  // compare things, and get larger one
+  // x
+  __m256 xmin = _mm256_set1_ps(aabb.xmin);
+  __m256 xmax = _mm256_set1_ps(aabb.xmax);
+  __m256 xr = _mm256_load_ps(rs.x.data());
+
+  __m256 ldx = _mm256_sub_ps(xmin, xr);
+  __m256 udx = _mm256_sub_ps(xr, xmax);
+
+  ldx =_mm256_max_ps(ldx, zero);
+  udx =_mm256_max_ps(udx, zero);
+
+  __m256 ldx2 = _mm256_mul_ps(ldx, ldx);
+  __m256 udx2 = _mm256_mul_ps(udx, udx);
+
+  __m256 xd =_mm256_max_ps(ldx2, udx2);
+  
+  // y
+  __m256 ymin = _mm256_set1_ps(aabb.ymin);
+  __m256 ymax = _mm256_set1_ps(aabb.ymax);
+  __m256 yr = _mm256_load_ps(rs.y.data());
+
+  __m256 ldy = _mm256_sub_ps(ymin, yr);
+  __m256 udy = _mm256_sub_ps(yr, ymax);
+
+  ldy =_mm256_max_ps(ldy, zero);
+  udy =_mm256_max_ps(udy, zero);
+
+  __m256 ldy2 = _mm256_mul_ps(ldy, ldy);
+  __m256 udy2 = _mm256_mul_ps(udy, udy);
+
+  __m256 yd =_mm256_max_ps(ldy2, udy2);
+
+  // z
+  __m256 zmin = _mm256_set1_ps(aabb.zmin);
+  __m256 zmax = _mm256_set1_ps(aabb.zmax);
+  __m256 zr = _mm256_load_ps(rs.z.data());
+
+  __m256 ldz = _mm256_sub_ps(zmin, zr);
+  __m256 udz = _mm256_sub_ps(zr, zmax);
+
+  ldz =_mm256_max_ps(ldz, zero);
+  udz =_mm256_max_ps(udz, zero);
+
+  __m256 ldz2 = _mm256_mul_ps(ldz, ldz);
+  __m256 udz2 = _mm256_mul_ps(udz, udz);
+
+  __m256 zd =_mm256_max_ps(ldz2, udz2);
+
+  // compare final thingy
+  __m256 d = _mm256_add_ps(xd, yd);
+  d = _mm256_add_ps(d, zd);
+
+  __m256 r2 = _mm256_set1_ps(rs.r*rs.r);
+  __m256 cmp = _mm256_cmp_ps(d, r2, _CMP_LT_OQ);
+
+  const int mask = _mm256_movemask_ps(cmp);
+  if (mask != 0){
+    return true;
+  }
   return false;
 }
 
@@ -174,7 +298,8 @@ using Edge = std::pair<Configuration<T>, Configuration<T>>;
 
 template<typename T>
 struct Environment{
-  std::vector<Sphere<T>> obstacles;
+  std::vector<Sphere<T>> sphere_obstacles;
+  std::vector<AABB<T>> aabb_obstacles;
 
   bool is_valid(const Configuration<T> &q) const{
     // update robot position
@@ -186,7 +311,15 @@ struct Environment{
 
     bool valid = true;
     // collide all objects
-    for (const auto &o: obstacles){
+    for (const auto &o: sphere_obstacles){
+      valid = valid && !collides(o, robot);
+
+      if (!valid){
+        return false;
+      }
+    }
+
+    for (const auto &o: aabb_obstacles){
       valid = valid && !collides(o, robot);
 
       if (!valid){
@@ -207,8 +340,15 @@ struct Environment{
     }
 
     bool valid = true;
-    for (const auto &obs: obstacles){
+    for (const auto &obs: sphere_obstacles){
       valid = valid && !collides(obs, rs);
+      if (!valid){
+        return false;
+      }
+    }
+    for (const auto &obs: aabb_obstacles){
+      //valid = valid && !collides(obs, rs);
+      std::cout << "not implemented" << std::endl;
       if (!valid){
         return false;
       }
@@ -225,8 +365,15 @@ struct Environment{
     rs.r = 0.5;
 
     bool valid = true;
-    for (const auto &obs: obstacles){
+    for (const auto &obs: sphere_obstacles){
       valid = valid && !collides(obs, rs);
+      if (!valid){
+        return false;
+      }
+    }
+    for (const auto &obs: aabb_obstacles){
+      //valid = valid && !collides(obs, rs);
+      std::cout << "not implemented" << std::endl;
       if (!valid){
         return false;
       }
@@ -242,7 +389,13 @@ struct Environment{
     rs.r = 0.5;
 
     bool valid = true;
-    for (const auto &obs: obstacles){
+    for (const auto &obs: sphere_obstacles){
+      valid = valid && !simd_collides(obs, rs);
+      if (!valid){
+        return false;
+      }
+    }
+    for (const auto &obs: aabb_obstacles){
       valid = valid && !simd_collides(obs, rs);
       if (!valid){
         return false;
@@ -526,11 +679,12 @@ void simd_edges_rake(Environment<float> env, const std::vector<Edge<float>> &edg
 }
 
 template<typename T>
-Environment<T> make_environment(const uint n, const uint seed=0){
+Environment<T> make_sphere_environment(const uint n, const uint seed=0){
   Environment<T> env;
 
   std::mt19937 gen(seed); // Standard mersenne_twister_engine seeded with rd()
   std::uniform_real_distribution<> dis(-5., 5.);
+  std::uniform_real_distribution<> size(0, 0.5);
 
   for (std::size_t i=0; i<n; ++i){
     Sphere<T> obs;
@@ -540,7 +694,20 @@ Environment<T> make_environment(const uint n, const uint seed=0){
 
     obs.r = 0.1;
 
-    env.obstacles.push_back(obs);
+    env.sphere_obstacles.push_back(obs);
+  }
+
+  for (std::size_t i=0; i<10; ++i){
+    AABB<T> obs;
+    obs.xmin = dis(gen);
+    obs.ymin = dis(gen);
+    obs.zmin = dis(gen);
+
+    obs.xmax = obs.xmin + size(gen);
+    obs.ymax = obs.ymin + size(gen);
+    obs.zmax = obs.zmin + size(gen);
+
+    env.aabb_obstacles.push_back(obs);
   }
 
   return env;
@@ -598,7 +765,7 @@ std::vector<Edge<T>> make_edges(const uint num_edges, const uint seed=0){
 
 void test_configurations(){
   const uint num_qs = 8000;
-  Environment<float> env = make_environment<float>(10);
+  Environment<float> env = make_sphere_environment<float>(10);
   std::vector<Configuration<float>> qs = make_random_configurations<float>(num_qs);
 
   std::vector<bool> v1_results;
@@ -653,7 +820,7 @@ void test_configurations(){
 
 void test_edges(){
   const uint num_obstacles = 50;
-  Environment<float> env = make_environment<float>(num_obstacles);
+  Environment<float> env = make_sphere_environment<float>(num_obstacles);
 
   const uint num_edges = 10000;
   std::vector<Edge<float>> edges = make_edges<float>(num_edges);
@@ -697,10 +864,10 @@ void test_edges(){
 
 void benchmark_random(){
   const uint num_obstacles = 100;
-  Environment<float> float_env = make_environment<float>(num_obstacles);
+  Environment<float> float_env = make_sphere_environment<float>(num_obstacles);
   std::vector<Configuration<float>> float_qs = make_random_configurations<float>(8000000);
 
-  Environment<double> double_env = make_environment<double>(num_obstacles);
+  Environment<double> double_env = make_sphere_environment<double>(num_obstacles);
   std::vector<Configuration<double>> double_qs = make_random_configurations<double>(8000000);
 
   // warmup
@@ -712,12 +879,12 @@ void benchmark_random(){
   sequential<double>(double_env, double_qs);
 
   std::cout << "batched, not parallel" << std::endl;
-  v2<float>(float_env, float_qs);
-  v2<double>(double_env, double_qs);
+  //v2<float>(float_env, float_qs);
+  //v2<double>(double_env, double_qs);
 
   std::cout << "batched, other memlayout" << std::endl;
-  v3<float>(float_env, float_qs);
-  v3<double>(double_env, double_qs);
+  //v3<float>(float_env, float_qs);
+  //v3<double>(double_env, double_qs);
 
   std::cout << "batched, simd" << std::endl;
   simd(float_env, float_qs);
@@ -727,7 +894,7 @@ void benchmark_random(){
 
 void benchmark_edges(){
   const uint num_obstacles = 100;
-  Environment<float> env = make_environment<float>(num_obstacles);
+  Environment<float> env = make_sphere_environment<float>(num_obstacles);
 
   const uint num_edges = 100000;
   std::vector<Edge<float>> edges = make_edges<float>(num_edges);
@@ -756,6 +923,6 @@ int main(){
   //test_configurations();
   //test_edges();
 
-  //benchmark_random();
+  benchmark_random();
   benchmark_edges();
 }
