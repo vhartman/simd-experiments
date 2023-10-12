@@ -106,9 +106,9 @@ bool collides(const AABB<T> &aabb, const Sphere<T> &l){
 
   // Squared distance
   T sq = 0.0;
-  sq += check( l.x, aabb.xmin, aabb.xmax );
-  sq += check( l.y, aabb.ymin, aabb.ymax );
-  sq += check( l.z, aabb.zmin, aabb.zmax );
+  sq += check_branchless( l.x, aabb.xmin, aabb.xmax );
+  sq += check_branchless( l.y, aabb.ymin, aabb.ymax );
+  sq += check_branchless( l.z, aabb.zmin, aabb.zmax );
 
   return sq <= l.r * l.r;
 }
@@ -117,53 +117,37 @@ bool simd_collides(const AABB<float> &aabb, const SphereArray<float> &rs){
   __m256 zero = _mm256_setzero_ps();
 
   // compare things, and get larger one
-  // x
-  __m256 xmin = _mm256_set1_ps(aabb.xmin);
-  __m256 xmax = _mm256_set1_ps(aabb.xmax);
-  __m256 xr = _mm256_load_ps(rs.x.data());
+  // X
+  // Computes
+  //   std::max(
+  //    std::max(xmin - x, 0)^2,
+  //    std::max(x - xmax, 0)^2
+  //   )
+  auto check = [&](
+    const float *p,
+    const float bmin,
+    const float bmax ) -> __m256 {
+    __m256 xmin = _mm256_set1_ps(bmin); // broadcast xmin to packed float register
+    __m256 xmax = _mm256_set1_ps(bmax); // broadcast xmax to packed float register
+    __m256 xr = _mm256_load_ps(p); // load sphere x-pos
 
-  __m256 ldx = _mm256_sub_ps(xmin, xr);
-  __m256 udx = _mm256_sub_ps(xr, xmax);
+    __m256 ldx = _mm256_sub_ps(xmin, xr); // xmin - x
+    __m256 udx = _mm256_sub_ps(xr, xmax); // x - xmax
 
-  ldx =_mm256_max_ps(ldx, zero);
-  udx =_mm256_max_ps(udx, zero);
+    ldx =_mm256_max_ps(ldx, zero); // max(xmin-x, 0)
+    udx =_mm256_max_ps(udx, zero); // max(x-xmax, 0)
 
-  __m256 ldx2 = _mm256_mul_ps(ldx, ldx);
-  __m256 udx2 = _mm256_mul_ps(udx, udx);
+    __m256 ldx2 = _mm256_mul_ps(ldx, ldx); // square the value
+    __m256 udx2 = _mm256_mul_ps(udx, udx);
 
-  __m256 xd =_mm256_max_ps(ldx2, udx2);
-  
-  // y
-  __m256 ymin = _mm256_set1_ps(aabb.ymin);
-  __m256 ymax = _mm256_set1_ps(aabb.ymax);
-  __m256 yr = _mm256_load_ps(rs.y.data());
+    __m256 xd =_mm256_max_ps(ldx2, udx2); // max(...)
 
-  __m256 ldy = _mm256_sub_ps(ymin, yr);
-  __m256 udy = _mm256_sub_ps(yr, ymax);
+    return xd;
+  };
 
-  ldy =_mm256_max_ps(ldy, zero);
-  udy =_mm256_max_ps(udy, zero);
-
-  __m256 ldy2 = _mm256_mul_ps(ldy, ldy);
-  __m256 udy2 = _mm256_mul_ps(udy, udy);
-
-  __m256 yd =_mm256_max_ps(ldy2, udy2);
-
-  // z
-  __m256 zmin = _mm256_set1_ps(aabb.zmin);
-  __m256 zmax = _mm256_set1_ps(aabb.zmax);
-  __m256 zr = _mm256_load_ps(rs.z.data());
-
-  __m256 ldz = _mm256_sub_ps(zmin, zr);
-  __m256 udz = _mm256_sub_ps(zr, zmax);
-
-  ldz =_mm256_max_ps(ldz, zero);
-  udz =_mm256_max_ps(udz, zero);
-
-  __m256 ldz2 = _mm256_mul_ps(ldz, ldz);
-  __m256 udz2 = _mm256_mul_ps(udz, udz);
-
-  __m256 zd =_mm256_max_ps(ldz2, udz2);
+  __m256 xd = check(rs.x.data(), aabb.xmin, aabb.xmax);
+  __m256 yd = check(rs.y.data(), aabb.ymin, aabb.ymax);
+  __m256 zd = check(rs.z.data(), aabb.zmin, aabb.zmax);
 
   // compare final thingy
   __m256 d = _mm256_add_ps(xd, yd);
@@ -686,7 +670,7 @@ Environment<T> make_sphere_environment(const uint n, const uint seed=0){
   std::uniform_real_distribution<> dis(-5., 5.);
   std::uniform_real_distribution<> size(0, 0.5);
 
-  for (std::size_t i=0; i<n; ++i){
+  for (std::size_t i=0; i<0; ++i){
     Sphere<T> obs;
     obs.x = dis(gen);
     obs.y = dis(gen);
@@ -697,7 +681,7 @@ Environment<T> make_sphere_environment(const uint n, const uint seed=0){
     env.sphere_obstacles.push_back(obs);
   }
 
-  for (std::size_t i=0; i<10; ++i){
+  for (std::size_t i=0; i<100; ++i){
     AABB<T> obs;
     obs.xmin = dis(gen);
     obs.ymin = dis(gen);
@@ -908,7 +892,7 @@ void benchmark_edges(){
   sequential_edges<float>(env, edges, num_pts);
 
   std::cout << "batched (linear)" << std::endl;
-  batched_edges(env, edges, num_pts);
+  //batched_edges(env, edges, num_pts);
 
   std::cout << "simd (linear)" << std::endl;
   simd_edges(env, edges, num_pts);
